@@ -1,107 +1,77 @@
-name: Build Binaries on PR
+name: Build and Push Fixed Image
 
 on:
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
-  build-frontend:
+  build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Build frontend artifact
-        uses: ./.github/actions/build-frontend
-        with:
-          artifact-name: komari-frontend
-
-  build-binaries:
-    needs: build-frontend
-    runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        goos: [windows, linux]
-        goarch: [amd64, arm64, 386, riscv64]
-        include:
-          # Windows
-          - goos: windows
-            goarch: amd64
-            zig_target_triple: x86_64-windows-gnu
-            binary_extension: .exe
-          - goos: windows
-            goarch: arm64
-            zig_target_triple: aarch64-windows-gnu
-            binary_extension: .exe
-          - goos: windows
-            goarch: 386
-            zig_target_triple: x86-windows-gnu
-            binary_extension: .exe
-
-          # Linux
-          - goos: linux
-            goarch: amd64
-            zig_target_triple: x86_64-linux-musl
-            binary_extension: ""
-          - goos: linux
-            goarch: arm64
-            zig_target_triple: aarch64-linux-musl
-            binary_extension: ""
-          - goos: linux
-            goarch: 386
-            zig_target_triple: x86-linux-musl
-            binary_extension: ""
-          - goos: linux
-            goarch: riscv64
-            zig_target_triple: riscv64-linux-musl
-            binary_extension: ""
-          - goos: linux
-            goarch: loong64
-            zig_target_triple: loongarch64-linux-musl
-            binary_extension: ""
-
-        exclude:
-          - goos: windows
-            goarch: riscv64
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Restore frontend artifact
-        uses: ./.github/actions/restore-frontend
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.23"
-
-      - name: Install Zig cross-compiler toolchain
-        uses: ./.github/actions/setup-zig
-
-      - name: Build binary
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 1
-          CC: zig cc -target ${{ matrix.zig_target_triple }}
-          GIN_MODE: release
+      - name: Apply SW fix
         run: |
-          BINARY_NAME=komari-${{ matrix.goos }}-${{ matrix.goarch }}
-          # Append the appropriate executable extension based on the OS
-          if [ "${{ matrix.binary_extension }}" != "" ]; then
-            BINARY_NAME=${BINARY_NAME}${{ matrix.binary_extension }}
-          fi
-          VERSION="${{ github.sha }}"
-          VERSION_HASH="${{ github.sha }}"
-          go build -trimpath -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${VERSION_HASH}" -o $BINARY_NAME
+          # Only replace the if-block that precedes stripServiceWorkerRegistration
+          LINE=$(grep -n 'stripServiceWorkerRegistration(htmlStr)' web/public/public.go | head -1 | cut -d: -f1)
+          sed -i "$((LINE-1))s/if forceDefaultTheme {/if forceDefaultTheme || !shouldReplace {/" web/public/public.go
+          grep -q "if forceDefaultTheme || !shouldReplace {" web/public/public.go || { echo "Fix failed to apply"; exit 1; }
+          echo "Fix applied successfully"
 
-      - name: Upload binary as artifact
-        uses: actions/upload-artifact@v4
+      - name: Create multi-stage Dockerfile
+        run: |
+          cat > Dockerfile.multi <<'DOCKERFILE'
+          # Stage 1: Build frontend (komari-web)
+          FROM node:23-alpine AS frontend
+          RUN apk add --no-cache git zstd tar
+          ARG KOMARI_WEB_REF=1.5.0-fix1
+          WORKDIR /build
+          RUN git clone --depth=1 --branch "$KOMARI_WEB_REF" https://github.com/komari-monitor/komari-web.git komari-web
+          WORKDIR /build/komari-web
+          RUN npm install && npm run build
+          WORKDIR /build
+          RUN mkdir -p defaultTheme && \
+              tar -cf defaultTheme/dist.tar -C komari-web/dist . && \
+              zstd -19 -T0 -q -f defaultTheme/dist.tar -o defaultTheme/dist.tar.zst && \
+              rm defaultTheme/dist.tar && \
+              cp komari-web/komari-theme.json defaultTheme/ && \
+              (cp komari-web/preview.png defaultTheme/ 2>/dev/null || true)
+
+          # Stage 2: Build Go backend
+          FROM golang:1.25-alpine AS backend
+          RUN apk add --no-cache gcc musl-dev
+          WORKDIR /build
+          COPY . .
+          COPY --from=frontend /build/defaultTheme/ web/public/defaultTheme/
+          RUN go build -trimpath -ldflags="-s -w" -o komari .
+
+          # Stage 3: Final image
+          FROM alpine:3.21
+          WORKDIR /app
+          RUN apk add --no-cache ca-certificates curl tzdata
+          COPY --from=backend /build/komari /app/komari
+          ENV GIN_MODE=release
+          ENV KOMARI_LISTEN=0.0.0.0:25774
+          EXPOSE 25774
+          CMD ["/app/komari", "server"]
+          DOCKERFILE
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
         with:
-          name: komari-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: komari-${{ matrix.goos }}-${{ matrix.goarch }}*
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.multi
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/komari:fixed
