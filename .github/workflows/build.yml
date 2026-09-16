@@ -17,43 +17,34 @@ jobs:
           grep -q "if forceDefaultTheme || !shouldReplace {" web/public/public.go || { echo "Fix failed to apply"; exit 1; }
           echo "Fix applied successfully"
 
-      - name: Create multi-stage Dockerfile
+      - name: Build frontend
+        uses: ./.github/actions/build-frontend
+        with:
+          ref: 1.5.0-fix1
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Install arm64 cross compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build amd64 binary
         run: |
-          cat > Dockerfile.multi <<'DOCKERFILE'
-          # Stage 1: Build frontend (komari-web)
-          FROM node:23-alpine AS frontend
-          RUN apk add --no-cache git zstd tar
-          ARG KOMARI_WEB_REF=1.5.0-fix1
-          WORKDIR /build
-          RUN git clone --depth=1 --branch "$KOMARI_WEB_REF" https://github.com/komari-monitor/komari-web.git komari-web
-          WORKDIR /build/komari-web
-          RUN npm install && npm run build
-          WORKDIR /build
-          RUN mkdir -p defaultTheme && \
-              tar -cf defaultTheme/dist.tar -C komari-web/dist . && \
-              zstd -19 -T0 -q -f defaultTheme/dist.tar -o defaultTheme/dist.tar.zst && \
-              rm defaultTheme/dist.tar && \
-              cp komari-web/komari-theme.json defaultTheme/ && \
-              (cp komari-web/preview.png defaultTheme/ 2>/dev/null || true)
+          VERSION="1.5.0-fix1"
+          HASH="$(git rev-parse --short HEAD)"
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC=gcc go build -trimpath \
+            -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${HASH}" \
+            -o komari-linux-amd64 .
 
-          # Stage 2: Build Go backend
-          FROM golang:1.25-alpine AS backend
-          RUN apk add --no-cache gcc musl-dev
-          WORKDIR /build
-          COPY . .
-          COPY --from=frontend /build/defaultTheme/ web/public/defaultTheme/
-          RUN go build -trimpath -ldflags="-s -w" -o komari .
-
-          # Stage 3: Final image
-          FROM alpine:3.21
-          WORKDIR /app
-          RUN apk add --no-cache ca-certificates curl tzdata
-          COPY --from=backend /build/komari /app/komari
-          ENV GIN_MODE=release
-          ENV KOMARI_LISTEN=0.0.0.0:25774
-          EXPOSE 25774
-          CMD ["/app/komari", "server"]
-          DOCKERFILE
+      - name: Build arm64 binary
+        run: |
+          VERSION="1.5.0-fix1"
+          HASH="$(git rev-parse --short HEAD)"
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -trimpath \
+            -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${HASH}" \
+            -o komari-linux-arm64 .
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -71,7 +62,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile.multi
+          file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/komari:fixed
