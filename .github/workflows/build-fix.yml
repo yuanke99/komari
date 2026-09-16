@@ -12,7 +12,7 @@ jobs:
       - name: Apply SW fix
         run: |
           # Only replace the if-block that precedes stripServiceWorkerRegistration
-          LINE=$(grep -n 'stripServiceWorkerRegistration' web/public/public.go | head -1 | cut -d: -f1)
+          LINE=$(grep -n 'stripServiceWorkerRegistration(htmlStr)' web/public/public.go | head -1 | cut -d: -f1)
           sed -i "$((LINE-1))s/if forceDefaultTheme {/if forceDefaultTheme || !shouldReplace {/" web/public/public.go
           grep -q "if forceDefaultTheme || !shouldReplace {" web/public/public.go || { echo "Fix failed to apply"; exit 1; }
           echo "Fix applied successfully"
