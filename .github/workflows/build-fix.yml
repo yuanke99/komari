@@ -27,14 +27,14 @@ jobs:
         with:
           go-version: '1.25'
 
-      - name: Install arm64 cross compiler
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Install Zig cross-compiler toolchain
+        uses: ./.github/actions/setup-zig
 
       - name: Build amd64 binary
         run: |
           VERSION="1.5.0-fix1"
           HASH="$(git rev-parse --short HEAD)"
-          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC=gcc go build -trimpath \
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC="zig cc -target x86_64-linux-musl" go build -trimpath \
             -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${HASH}" \
             -o komari-linux-amd64 .
 
@@ -42,7 +42,7 @@ jobs:
         run: |
           VERSION="1.5.0-fix1"
           HASH="$(git rev-parse --short HEAD)"
-          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -trimpath \
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC="zig cc -target aarch64-linux-musl" go build -trimpath \
             -ldflags="-s -w -X github.com/komari-monitor/komari/utils.CurrentVersion=${VERSION} -X github.com/komari-monitor/komari/utils.VersionHash=${HASH}" \
             -o komari-linux-arm64 .
 
